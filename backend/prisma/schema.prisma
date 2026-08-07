@@ -1,0 +1,171 @@
+// VolunteerShield database schema
+// SQLite by default (zero-config, file-based) — swap the datasource to
+// PostgreSQL for production by changing `provider` and `DATABASE_URL`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  COORDINATOR
+  VOLUNTEER
+}
+
+enum BackgroundCheckStatus {
+  PENDING
+  CLEARED
+  EXPIRED
+  REJECTED
+}
+
+enum BookingStatus {
+  CONFIRMED
+  WAITLISTED
+  CANCELLED
+  REDIRECTED // blocked booking attempt, sent to background-check request flow
+}
+
+enum AttendanceStatus {
+  ATTENDED
+  NO_SHOW
+  EXCUSED
+  PENDING // shift hasn't happened yet
+}
+
+enum SmsType {
+  SHIFT_REMINDER
+  REPLACEMENT_REQUEST
+  CANCELLATION_CONFIRMATION
+  BACKGROUND_CHECK_REDIRECT
+  BACKGROUND_CHECK_EXPIRING
+}
+
+enum SmsStatus {
+  SENT
+  FAILED
+  SIMULATED // used when no SMS provider credentials are configured
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(VOLUNTEER)
+  volunteer    Volunteer?
+  createdAt    DateTime @default(now())
+}
+
+model ProgramArea {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  shifts      Shift[]
+  createdAt   DateTime @default(now())
+}
+
+model Volunteer {
+  id               String            @id @default(cuid())
+  userId           String?           @unique
+  user             User?             @relation(fields: [userId], references: [id])
+  firstName        String
+  lastName         String
+  email            String            @unique
+  phone            String
+  programAreaId    String?
+  programArea      ProgramArea?      @relation(fields: [programAreaId], references: [id])
+  active           Boolean           @default(true)
+  joinedAt         DateTime          @default(now())
+  backgroundChecks BackgroundCheck[]
+  bookings         ShiftBooking[]
+  attendanceLogs   AttendanceLog[]
+  smsMessages      SmsMessage[]
+
+  @@index([programAreaId])
+}
+
+model BackgroundCheck {
+  id              String                 @id @default(cuid())
+  volunteerId     String
+  volunteer       Volunteer              @relation(fields: [volunteerId], references: [id])
+  provider        String // e.g. "Checkr", "State Registry"
+  referenceNumber String
+  status          BackgroundCheckStatus  @default(PENDING)
+  requestedAt     DateTime               @default(now())
+  issuedAt        DateTime?
+  expiresAt       DateTime?
+  notes           String?
+
+  @@index([volunteerId, status])
+}
+
+model Shift {
+  id                      String         @id @default(cuid())
+  title                   String
+  description             String?
+  programAreaId           String
+  programArea             ProgramArea    @relation(fields: [programAreaId], references: [id])
+  location                String
+  startTime               DateTime
+  endTime                 DateTime
+  capacity                Int            @default(1)
+  requiresBackgroundCheck Boolean        @default(false)
+  reminderSentAt          DateTime?
+  createdAt               DateTime       @default(now())
+  bookings                ShiftBooking[]
+
+  @@index([programAreaId, startTime])
+}
+
+model ShiftBooking {
+  id             String            @id @default(cuid())
+  shiftId        String
+  shift          Shift             @relation(fields: [shiftId], references: [id])
+  volunteerId    String
+  volunteer      Volunteer         @relation(fields: [volunteerId], references: [id])
+  status         BookingStatus     @default(CONFIRMED)
+  bookedAt       DateTime          @default(now())
+  cancelledAt    DateTime?
+  cancelReason   String?
+  isLastMinute   Boolean           @default(false) // cancelled < 24h before shift start
+  attendance     AttendanceLog?
+
+  @@unique([shiftId, volunteerId])
+  @@index([shiftId, status])
+}
+
+// Append-only log: rows are created once and never mutated, so grant
+// auditors always see the clearance status exactly as it stood at shift time.
+model AttendanceLog {
+  id                     String            @id @default(cuid())
+  shiftBookingId         String            @unique
+  shiftBooking           ShiftBooking      @relation(fields: [shiftBookingId], references: [id])
+  volunteerId            String
+  volunteer              Volunteer         @relation(fields: [volunteerId], references: [id])
+  status                 AttendanceStatus  @default(PENDING)
+  clearanceStatusAtShift String? // snapshot: "CLEARED (exp. 2027-01-04)" or "NOT_REQUIRED"
+  programAreaName        String // denormalized snapshot for durable reporting
+  shiftStartTime         DateTime
+  loggedAt               DateTime          @default(now())
+  loggedBy               String            @default("system")
+
+  @@index([programAreaName, shiftStartTime])
+}
+
+model SmsMessage {
+  id          String     @id @default(cuid())
+  volunteerId String
+  volunteer   Volunteer  @relation(fields: [volunteerId], references: [id])
+  type        SmsType
+  body        String
+  status      SmsStatus  @default(SIMULATED)
+  providerSid String?
+  sentAt      DateTime   @default(now())
+
+  @@index([volunteerId, type])
+}
